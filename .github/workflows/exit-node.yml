@@ -4,7 +4,6 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: write   # lets it trigger the client workflow
   contents: read
 
 jobs:
@@ -19,23 +18,27 @@ jobs:
           echo 'net.ipv6.conf.all.forwarding = 1' | sudo tee -a /etc/sysctl.d/99-tailscale.conf
           sudo sysctl -p /etc/sysctl.d/99-tailscale.conf
 
+      # Use the SAME OAuth client as the login workflow (same value as in the Mega sheet),
+      # stored here as repo secrets, so both workflows join the same tailnet.
       - name: Connect Tailscale as exit node
         uses: tailscale/github-action@v3
         with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
           hostname: gh-exit-node
           args: --advertise-exit-node
 
-      - name: Print IPs and trigger client workflow
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Verify connected and print IPs
         run: |
-          TS_IP=$(tailscale ip -4)
+          STATE=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("BackendState",""))' || true)
+          echo "Tailscale state: ${STATE:-unknown}"
+          [ "$STATE" = "Running" ] || { echo "::error::Tailscale did not connect (state: ${STATE:-unknown}). Check TS_OAUTH_CLIENT_ID / TS_OAUTH_SECRET repo secrets."; exit 1; }
           echo "=============================="
-          echo "EXIT NODE TAILSCALE IP: $TS_IP"
-          echo "EXIT NODE PUBLIC IP:    $(curl -s https://ifconfig.me)"
+          echo "EXIT NODE TAILSCALE IP: $(tailscale ip -4)"
+          echo "EXIT NODE PUBLIC IP:    $(curl -s --max-time 20 https://ifconfig.me)"
+          echo "tailnet: $(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["MagicDNSSuffix"])')"
           echo "=============================="
-          gh workflow run client.yml --repo "${{ github.repository }}" -f exit_node_ip="$TS_IP"
 
       - name: Keep exit node alive
         run: sleep 21000   # ~5h50m
